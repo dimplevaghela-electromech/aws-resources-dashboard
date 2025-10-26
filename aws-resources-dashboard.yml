@@ -1,0 +1,386 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudWatch Dashboard for monitoring EC2 instances, RDS instances, and EBS volumes across regions
+
+Parameters:
+  DashboardName:
+    Type: String
+    Default: AWS-Resources-Dashboard
+    Description: Name for the CloudWatch dashboard
+
+Resources:
+  ResourcesDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Ref DashboardName
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/EC2", "InstanceCount", { "stat": "Maximum" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-east-1",
+                "title": "EC2 Instances Count - US East 1",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/EC2", "InstanceCount", { "stat": "Maximum" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-west-2",
+                "title": "EC2 Instances Count - US West 2",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/RDS", "DatabaseConnections", { "stat": "Maximum" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-east-1",
+                "title": "RDS Instances - US East 1",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/RDS", "DatabaseConnections", { "stat": "Maximum" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-west-2",
+                "title": "RDS Instances - US West 2",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/EBS", "VolumeReadOps", { "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-east-1",
+                "title": "EBS Volumes Count - US East 1",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/EBS", "VolumeReadOps", { "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-west-2",
+                "title": "EBS Volumes Count - US West 2",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+  # Custom Metrics Lambda Function
+  CustomMetricsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ResourceCountMetrics
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          
+          def lambda_handler(event, context):
+              cloudwatch = boto3.client('cloudwatch')
+              
+              # Get all regions
+              ec2 = boto3.client('ec2')
+              regions = [region['RegionName'] for region in ec2.describe_regions()['Regions']]
+              
+              for region in regions:
+                  try:
+                      # EC2 instances count
+                      ec2_client = boto3.client('ec2', region_name=region)
+                      instances = ec2_client.describe_instances()
+                      running_instances = 0
+                      for reservation in instances['Reservations']:
+                          for instance in reservation['Instances']:
+                              if instance['State']['Name'] == 'running':
+                                  running_instances += 1
+                      
+                      cloudwatch.put_metric_data(
+                          Namespace='Custom/Resources',
+                          MetricData=[
+                              {
+                                  'MetricName': 'RunningEC2Instances',
+                                  'Dimensions': [
+                                      {
+                                          'Name': 'Region',
+                                          'Value': region
+                                      }
+                                  ],
+                                  'Value': running_instances,
+                                  'Unit': 'Count'
+                              }
+                          ]
+                      )
+                      
+                      # RDS instances count
+                      rds_client = boto3.client('rds', region_name=region)
+                      rds_instances = rds_client.describe_db_instances()
+                      rds_count = len(rds_instances['DBInstances'])
+                      
+                      cloudwatch.put_metric_data(
+                          Namespace='Custom/Resources',
+                          MetricData=[
+                              {
+                                  'MetricName': 'RDSInstances',
+                                  'Dimensions': [
+                                      {
+                                          'Name': 'Region',
+                                          'Value': region
+                                      }
+                                  ],
+                                  'Value': rds_count,
+                                  'Unit': 'Count'
+                              }
+                          ]
+                      )
+                      
+                      # EBS volumes count
+                      volumes = ec2_client.describe_volumes()
+                      volume_count = len(volumes['Volumes'])
+                      
+                      cloudwatch.put_metric_data(
+                          Namespace='Custom/Resources',
+                          MetricData=[
+                              {
+                                  'MetricName': 'EBSVolumes',
+                                  'Dimensions': [
+                                      {
+                                          'Name': 'Region',
+                                          'Value': region
+                                      }
+                                  ],
+                                  'Value': volume_count,
+                                  'Unit': 'Count'
+                              }
+                          ]
+                      )
+                      
+                  except Exception as e:
+                      print(f"Error processing region {region}: {str(e)}")
+                      continue
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Metrics published successfully')
+              }
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ResourceMetricsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeRegions
+                  - rds:DescribeDBInstances
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+
+  MetricsScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger Lambda function every 5 minutes
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CustomMetricsFunction.Arn
+          Id: MetricsLambdaTarget
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CustomMetricsFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MetricsScheduleRule.Arn
+
+  # Enhanced Dashboard with Custom Metrics
+  EnhancedResourcesDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${DashboardName}-Enhanced"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "Custom/Resources", "RunningEC2Instances", "Region", "us-east-1" ],
+                  [ ".", ".", ".", "us-west-2" ],
+                  [ ".", ".", ".", "eu-west-1" ],
+                  [ ".", ".", ".", "ap-southeast-1" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-east-1",
+                "title": "Running EC2 Instances by Region",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "Custom/Resources", "RDSInstances", "Region", "us-east-1" ],
+                  [ ".", ".", ".", "us-west-2" ],
+                  [ ".", ".", ".", "eu-west-1" ],
+                  [ ".", ".", ".", "ap-southeast-1" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-east-1",
+                "title": "RDS Instances by Region",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16,
+              "y": 0,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "Custom/Resources", "EBSVolumes", "Region", "us-east-1" ],
+                  [ ".", ".", ".", "us-west-2" ],
+                  [ ".", ".", ".", "eu-west-1" ],
+                  [ ".", ".", ".", "ap-southeast-1" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-east-1",
+                "title": "EBS Volumes by Region",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "Custom/Resources", "RunningEC2Instances", "Region", "us-east-1" ],
+                  [ "Custom/Resources", "RDSInstances", "Region", "us-east-1" ],
+                  [ "Custom/Resources", "EBSVolumes", "Region", "us-east-1" ]
+                ],
+                "view": "singleValue",
+                "region": "us-east-1",
+                "title": "US East 1 - Resource Summary",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "Custom/Resources", "RunningEC2Instances", "Region", "us-west-2" ],
+                  [ "Custom/Resources", "RDSInstances", "Region", "us-west-2" ],
+                  [ "Custom/Resources", "EBSVolumes", "Region", "us-west-2" ]
+                ],
+                "view": "singleValue",
+                "region": "us-east-1",
+                "title": "US West 2 - Resource Summary",
+                "period": 300,
+                "stat": "Average"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  DashboardURL:
+    Description: URL of the CloudWatch Dashboard
+    Value: !Sub "https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${DashboardName}"
+  
+  EnhancedDashboardURL:
+    Description: URL of the Enhanced CloudWatch Dashboard
+    Value: !Sub "https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${DashboardName}-Enhanced"
